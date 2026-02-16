@@ -1,46 +1,52 @@
-# CLAUDE.md — OTVP (RLS Scanner)
+# CLAUDE.md — OTVP Specification
 
-## What This Repo Does
+## What This Repo Is
 
-Standalone Python tool that detects Supabase Row Level Security (RLS) misconfigurations. This was the starting point for the broader OTVP platform.
+The **Open Transparency Verification Platform specification** — this defines the OTVP standard itself. It is not code. It is the authoritative document that describes how trust envelopes work, what controls are verified, how agents should behave, and how results are structured.
 
-**Two modes:**
-1. **Self-audit** (`supabase_rls_tester.py`) — Tests your own Supabase project for RLS gaps using the anon key. Read-only, safe for production.
-2. **Recon** (`supabase.py`) — Crawls target websites to find exposed Supabase anon keys in JS bundles, then tests them for RLS vulnerabilities. **Only use on targets you own or have written authorization to test.**
+## Repository Structure
 
-## Why This Exists
+```
+otvp/
+├── OTVP-Specification-v1.0.md    # The full spec (65KB) — primary document
+├── README.md                      # Project overview and quickstart
+├── LICENSE
+├── CONTRIBUTING.md                # How to contribute to the spec
+├── GOVERNANCE.md                  # Governance model for the standard
+├── agents/
+│   └── reference/                 # (empty) Placeholder for reference agent implementations
+├── mappings/                      # (empty) Placeholder for control-to-framework mappings
+├── schemas/                       # (empty) Placeholder for envelope JSON schemas
+├── spec/                          # (empty) Placeholder for supplementary spec docs
+├── examples/
+│   ├── envelopes/                 # (empty) Placeholder for example envelope JSON files
+│   └── queries/                   # (empty) Placeholder for example queries
+└── CLAUDE.md
+```
 
-Supabase exposes databases via PostgREST. Every table in the `public` schema is queryable through the REST API. RLS is the primary access control — if it's missing or misconfigured, data is exposed to anyone with the anon key (which is intentionally public).
+**Note:** Most subdirectories are empty placeholders for future content. The real substance is in `OTVP-Specification-v1.0.md`.
 
-This tool validates whether the gap between "schema is exposed" and "RLS is enforced" is properly closed.
+## Key Concepts
 
-## Part of a Larger System
+- **Trust Envelope** — a signed, point-in-time attestation of a specific security control's status
+- **Control Criteria** — the 11 security checks mapped to SOC 2 Common Criteria (CC6.x, CC7.x, CC9.x)
+- **Agent** — an autonomous process that evaluates infrastructure against a control criterion and produces an envelope
+- **Killswitch Advisory** — Bil's advisory firm, used as the organization identifier in envelopes
 
-This repo is the narrow, standalone version. The broader OTVP platform lives across sibling repos:
-- **otvp-sdk** — 11-control agent framework (this repo only covers RLS)
-- **otvp-app** — Next.js web interface for running agents and viewing results
-- See `~/otvp-projects/CLAUDE.md` for the full picture
+## Relationship to Other Repos
 
-## Technical Details
+- **otvp-sdk** implements this spec — Python agents that produce trust envelopes
+- **otvp-app** displays the envelopes produced by the SDK
+- **otvp-dashboard** is deprecated static UI
+- See `~/otvp-projects/CLAUDE.md` for the full system overview
 
-- **Language:** Python
-- **Virtual environment:** `otvp-env`
-- **Key dependencies:** requests, beautifulsoup4 (for recon mode)
-- **Output:** `results.txt` (local only, never commit this)
+## Working on This Repo
 
-## Development Rules
+This is a **documentation repo**. Changes here are spec changes, not code changes. When editing:
+- The spec doc is the source of truth — if the SDK disagrees with the spec, the spec wins
+- Placeholder directories should be populated as the project matures (example envelopes, JSON schemas, reference implementations)
+- Changes to control criteria or envelope structure here should be reflected in otvp-sdk
 
-- All scanning is **read-only** (GET requests only)
-- No data leaves the local machine unless the operator exports it
-- Never hardcode URLs, keys, or credentials
-- `.gitignore` must include: `results.txt`, `.env`, `*.log`, `__pycache__/`
-- Test only against projects you own
+## Owner Context
 
-## Supabase Security Context
-
-Key concepts for anyone working on this code:
-- **Anon key** = public, grants the `anon` Postgres role, should be restricted by RLS
-- **Service role key** = god-mode, bypasses RLS entirely, must NEVER be exposed client-side
-- **PostgREST** = REST API auto-generated from DB schema
-- **RLS** = Row Level Security, Postgres-native access control using policies
-- **Auth model:** GoTrue issues JWTs → PostgREST enforces RLS via `auth.uid()` and `auth.role()`
+Bil Harmer — CISO at Supabase, founder of Killswitch Advisory. This spec is designed to be an open standard that others could implement, not just an internal tool. Treat it accordingly — clarity and precision matter.
