@@ -1260,6 +1260,150 @@ The OTVP project maintains open-source reference implementations:
 - `otvp-query-builder` — Interactive Trust Query builder
 - `otvp-dashboard` — Web dashboard for subjects and relying parties
 
+### 15.5 Endpoint Discovery & DNS Verification
+
+OTVP endpoints are published using the `.well-known` URI convention ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615)). DNS TXT records provide an out-of-band trust anchor that binds a domain to a specific public key, independent of the web server.
+
+#### 15.5.1 Discovery Endpoint
+
+Subject companies MUST publish a configuration document at:
+
+```
+https://{domain}/.well-known/otvp/otvp-config.json
+```
+
+The configuration document has the following structure:
+
+```json
+{
+  "otvp_version": "1.0",
+  "otvp_id": "otvp:org:acme-corp",
+  "organization": "Acme Corp",
+  "contact_email": "security@acme-corp.com",
+  "public_keys": [
+    {
+      "kid": "acme-2026-primary",
+      "algorithm": "Ed25519",
+      "public_key": "<base64-encoded raw Ed25519 public key>",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_until": "2027-01-01T00:00:00Z",
+      "revoked": false
+    }
+  ],
+  "endpoints": {
+    "envelopes": "/.well-known/otvp/envelopes/index.json",
+    "latest": "/.well-known/otvp/envelopes/latest.json"
+  },
+  "domains_covered": [
+    "data_protection.encryption.at_rest",
+    "identity_and_access.authentication.mfa_enforcement"
+  ],
+  "retention_days": 365,
+  "refresh_interval_seconds": 3600
+}
+```
+
+**Required fields:** `otvp_version`, `otvp_id`, `organization`, `public_keys` (at least one non-revoked key), `endpoints`.
+
+**Envelope endpoints:** The configuration references two retrieval patterns:
+- `envelopes` — An index document listing individual envelope files (preferred for granular access)
+- `latest` — A single document containing the most recent envelopes (convenience endpoint)
+
+#### 15.5.2 DNS TXT Record Format
+
+Subject companies SHOULD publish a DNS TXT record at:
+
+```
+_otvp.{domain}. IN TXT "v=otvp1; fp={sha256-hex}; kid={key_id}; org={otvp_id}"
+```
+
+**Fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `v=otvp1` | MUST | Protocol version identifier. Follows the convention established by SPF (`v=spf1`), DKIM (`v=DKIM1`), and DMARC (`v=DMARC1`). |
+| `fp=` | MUST | SHA-256 hex digest (64 characters) of the raw Ed25519 public key bytes (32 bytes). |
+| `kid=` | MUST | Key ID matching the `kid` field in the `public_keys` array of the `otvp-config.json` document. |
+| `org=` | SHOULD | OTVP organization ID. Provides a cross-check against the config's `otvp_id`. |
+
+**Example:**
+
+```
+_otvp.acme-corp.com. 3600 IN TXT "v=otvp1; fp=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08; kid=acme-2026-primary; org=otvp:org:acme-corp"
+```
+
+**Size constraint:** A single DNS TXT string is limited to 255 bytes. The OTVP record format uses approximately 148 characters, well within this limit.
+
+**Generating the fingerprint:** The fingerprint is computed as follows:
+
+```
+fingerprint = hex(SHA-256(raw_ed25519_public_key_bytes))
+```
+
+Where `raw_ed25519_public_key_bytes` is the 32-byte raw public key (the same bytes that are base64-encoded in the `public_key` field of `otvp-config.json`).
+
+#### 15.5.3 Verification Procedure
+
+Relying parties SHOULD verify DNS records when discovering a new vendor. The verification procedure is:
+
+1. Fetch and validate `otvp-config.json` from the vendor's `.well-known/otvp/` endpoint.
+2. Query DNS for TXT records at `_otvp.{domain}`.
+3. For each TXT record beginning with `v=otvp1`:
+   a. Parse the semicolon-delimited fields (`fp`, `kid`, `org`).
+   b. Locate the key in `otvp-config.json` where `public_keys[].kid` matches the record's `kid`.
+   c. Compute `SHA-256` of that key's raw public key bytes.
+   d. Compare the hex digest to the record's `fp` value.
+4. If any active (non-revoked) key matches any TXT record: **DNS verified**.
+5. If the `org` field is present, verify it matches `otvp-config.json`'s `otvp_id`.
+
+**Verification states:**
+
+| State | Meaning | Recommended UI |
+|-------|---------|----------------|
+| **Verified** | At least one active key fingerprint matches a TXT record | Green indicator |
+| **Not configured** | No `_otvp` TXT records exist for this domain | Yellow warning — trust relies solely on HTTPS |
+| **Mismatch** | TXT records exist but no fingerprint matches any active key | Red warning — possible key compromise or stale DNS |
+
+**Browser-based implementations:** Web applications cannot perform raw DNS queries. Implementations SHOULD use DNS-over-HTTPS (DoH) providers such as:
+- Cloudflare: `https://cloudflare-dns.com/dns-query?name=_otvp.{domain}&type=TXT` (header: `Accept: application/dns-json`)
+- Google: `https://dns.google/resolve?name=_otvp.{domain}&type=TXT`
+
+Implementations SHOULD use at least two DoH providers as fallbacks to mitigate provider outages.
+
+#### 15.5.4 Key Rotation
+
+Key rotation requires coordination between the config endpoint and DNS:
+
+1. **Add the new key** to `otvp-config.json`'s `public_keys` array (both old and new keys active).
+2. **Add a second TXT record** at `_otvp.{domain}` with the new key's fingerprint and `kid`.
+3. **Wait for DNS propagation** (at least 2× the DNS TTL).
+4. **Revoke the old key** in `otvp-config.json` (set `revoked: true`).
+5. **Remove the old TXT record** after a grace period.
+
+Multiple TXT records at `_otvp.{domain}` are valid during rotation. Verification passes if ANY active key matches ANY record.
+
+A recommended DNS TTL for `_otvp` records is 3600 seconds (1 hour). Lower TTLs speed up rotation but increase DNS query volume.
+
+#### 15.5.5 Trust Model Layers
+
+DNS verification is one layer in a defense-in-depth trust model:
+
+| Layer | Mechanism | Question Answered |
+|-------|-----------|-------------------|
+| **0 — Domain Control** | DNS TXT record at `_otvp.{domain}` | Does the domain admin endorse this public key? |
+| **1 — Endpoint Discovery** | `.well-known/otvp/otvp-config.json` over HTTPS | What keys, endpoints, and domains does this vendor support? |
+| **2 — Envelope Integrity** | Ed25519 signatures, Merkle trees, PKI chain | Is this envelope authentic and untampered? |
+
+Missing DNS (Layer 0) degrades trust but does not prevent verification. Relying parties MAY accept envelopes from vendors without DNS verification, but SHOULD display the reduced trust level to users.
+
+#### 15.5.6 DNSSEC
+
+Implementations SHOULD support DNSSEC validation but MUST NOT require it. When using DoH providers, the JSON response includes an `AD` (Authenticated Data) flag indicating whether the DNS response was DNSSEC-validated. Implementations MAY display DNSSEC status as an additional trust signal.
+
+#### 15.5.7 Subdomain Delegation
+
+If a vendor serves OTVP from a subdomain (e.g., `security.acme-corp.com`), the TXT record MUST be placed at `_otvp.security.acme-corp.com`, matching the domain from which `otvp-config.json` is served.
+
 ---
 
 ## 16. Governance & Standards Body
